@@ -1,4 +1,5 @@
 # app.py — Baza.Key Backend + Web UI v1.2.0
+# Logic: 2x LootLabs completion → key issued. Free plan only.
 import os
 import json
 import time
@@ -25,16 +26,17 @@ def init_db():
         created INTEGER
     )""")
     con.execute("""CREATE TABLE IF NOT EXISTS postbacks (
-        unique_id TEXT PRIMARY KEY,
-        click_id TEXT,
-        ip TEXT,
-        timestamp INTEGER
+        click_id TEXT PRIMARY KEY,
+        completions INTEGER DEFAULT 0,
+        last_ip TEXT,
+        last_ts INTEGER,
+        keys_issued INTEGER DEFAULT 0
     )""")
     con.commit()
     con.close()
 
 # ============================================================
-# HTML TEMPLATES (embedded)
+# CSS (shared)
 # ============================================================
 BASE_CSS = """
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -47,10 +49,11 @@ body {
     align-items: center;
     justify-content: center;
     background: radial-gradient(ellipse at top, #3a0000 0%, #000 60%);
+    padding: 20px;
 }
 .card {
     width: 100%;
-    max-width: 420px;
+    max-width: 440px;
     background: linear-gradient(135deg, #000 0%, #1a0000 100%);
     border: 1.5px solid #ff2828;
     border-radius: 14px;
@@ -87,11 +90,9 @@ body {
     text-align: center;
     color: #c89696;
     font-size: 13px;
-    margin-bottom: 28px;
+    margin-bottom: 24px;
 }
-.input-group {
-    margin-bottom: 14px;
-}
+.input-group { margin-bottom: 14px; }
 input, select {
     width: 100%;
     padding: 14px 16px;
@@ -121,6 +122,7 @@ button {
     cursor: pointer;
     transition: transform 0.15s, box-shadow 0.2s;
     letter-spacing: 0.5px;
+    margin-top: 8px;
 }
 button:hover {
     transform: translateY(-1px);
@@ -146,7 +148,7 @@ button:active { transform: translateY(0); }
     display: block;
     margin-bottom: 8px;
 }
-.result .meta { color: #c89696; font-size: 12px; }
+.result .meta { color: #c89696; font-size: 12px; line-height: 1.6; }
 .error {
     color: #ff2828;
     font-size: 13px;
@@ -180,8 +182,40 @@ button:active { transform: translateY(0); }
     margin-bottom: 16px;
     font-weight: 600;
 }
+.plan-box {
+    padding: 14px 16px;
+    background: #0a0000;
+    border: 1px solid #4a0000;
+    border-radius: 8px;
+    color: #c89696;
+    text-align: center;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+}
+.step {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    background: linear-gradient(135deg, #8b0000, #ff2828);
+    border-radius: 50%;
+    text-align: center;
+    line-height: 24px;
+    font-weight: 700;
+    font-size: 13px;
+    margin-right: 8px;
+}
+.info-line {
+    color: #c89696;
+    font-size: 13px;
+    text-align: center;
+    margin: 16px 0;
+    line-height: 1.6;
+}
 """
 
+# ============================================================
+# HTML — LANDING (index)
+# ============================================================
 INDEX_HTML = """<!DOCTYPE html>
 <html>
 <head>
@@ -194,15 +228,10 @@ INDEX_HTML = """<!DOCTYPE html>
     <div class="card">
         <div class="badge">BAZA.KEY v1.2.0</div>
         <div class="logo">Baza.Key</div>
-        <div class="subtitle">Generate your access key for BCL</div>
+        <div class="subtitle">Free access key for BCL</div>
 
         <div class="input-group">
-            <select id="plan">
-                <option value="free">Free — 1 000 tokens / 24h</option>
-                <option value="standard" selected>Standard — 10 000 tokens / 24h</option>
-                <option value="pro">Pro — 50 000 tokens / 72h</option>
-                <option value="ultra">Ultra — 200 000 tokens / 168h</option>
-            </select>
+            <div class="plan-box">FREE — 1000 tokens / 24h</div>
         </div>
         <div class="input-group">
             <input type="text" id="hwid" placeholder="Your HWID (optional)" />
@@ -213,12 +242,11 @@ INDEX_HTML = """<!DOCTYPE html>
         <div class="result" id="result"></div>
         <div class="error" id="error"></div>
 
-        <a class="discord" href="https://discord.gg/vVFeyntpa" target="_blank">Join BCL Discord</a>
+        <a class="discord" href="https://discord.gg/vVFeyntpa" target="_blank">Join in Baza Community</a>
     </div>
 
     <script>
         async function generate() {
-            const plan = document.getElementById('plan').value;
             const hwid = document.getElementById('hwid').value.trim();
             const result = document.getElementById('result');
             const error = document.getElementById('error');
@@ -230,7 +258,7 @@ INDEX_HTML = """<!DOCTYPE html>
                 const res = await fetch('/api/generate', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ plan, hwid })
+                    body: JSON.stringify({ plan: 'free', hwid })
                 });
                 const data = await res.json();
 
@@ -239,7 +267,7 @@ INDEX_HTML = """<!DOCTYPE html>
                     result.innerHTML =
                         '<span class="key">' + data.key + '</span>' +
                         '<div class="meta">' +
-                        'Plan: ' + data.plan.toUpperCase() + '<br>' +
+                        'Plan: FREE<br>' +
                         'Tokens: ' + data.tokens + '<br>' +
                         'Expires: ' + exp.toLocaleString() +
                         '</div>';
@@ -258,6 +286,66 @@ INDEX_HTML = """<!DOCTYPE html>
 </html>
 """
 
+# ============================================================
+# HTML — STEP 2 (after first LootLabs completion)
+# ============================================================
+STEP2_HTML = """<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Baza.Key — Step 2/2</title>
+    <style>""" + BASE_CSS + """</style>
+</head>
+<body>
+    <div class="card">
+        <div class="badge">STEP 1/2 COMPLETE</div>
+        <div class="logo">Almost there</div>
+        <div class="subtitle">One more step to get your key</div>
+
+        <div class="info-line">
+            <span class="step">2</span>Pass the tasks one more time to unlock your key.
+        </div>
+
+        <div class="input-group">
+            <input type="text" id="puid" placeholder="Your user ID (same as in link)" />
+        </div>
+
+        <button onclick="nextStep()">Continue to Step 2/2</button>
+
+        <div class="result" id="result"></div>
+        <div class="error" id="error"></div>
+
+        <a class="discord" href="https://discord.gg/vVFeyntpa" target="_blank">Join in Baza Community</a>
+    </div>
+
+    <script>
+        async function nextStep() {
+            const puid = document.getElementById('puid').value.trim();
+            const error = document.getElementById('error');
+            const result = document.getElementById('result');
+
+            error.classList.remove('show');
+            result.classList.remove('show');
+
+            if (!puid) {
+                error.textContent = 'Enter your user ID';
+                error.classList.add('show');
+                return;
+            }
+
+            // Redirect user back to LootLabs link for second completion
+            // In real usage, this would be set to your second loot-link
+            window.location.href = 'https://loot-link.com/s?SECOND_LINK&puid=' + encodeURIComponent(puid);
+        }
+    </script>
+</body>
+</html>
+"""
+
+# ============================================================
+# HTML — ADMIN
+# ============================================================
 ADMIN_HTML = """<!DOCTYPE html>
 <html>
 <head>
@@ -274,10 +362,8 @@ ADMIN_HTML = """<!DOCTYPE html>
 
         <div class="input-group">
             <select id="plan">
-                <option value="free">Free (1 000)</option>
-                <option value="standard" selected>Standard (10 000)</option>
-                <option value="pro">Pro (50 000)</option>
-                <option value="ultra">Ultra (200 000)</option>
+                <option value="free" selected>Free (1 000)</option>
+                <option value="standard">Standard (10 000)</option>
             </select>
         </div>
         <div class="input-group">
@@ -336,11 +422,10 @@ ADMIN_HTML = """<!DOCTYPE html>
 PLAN_CONFIG = {
     "free":     {"tokens": 1000,   "hours": 24},
     "standard": {"tokens": 10000,  "hours": 24},
-    "pro":      {"tokens": 50000,  "hours": 72},
-    "ultra":    {"tokens": 200000, "hours": 168},
 }
 
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "changeme123")
+REQUIRED_COMPLETIONS = 2  # User must pass LootLabs 2 times
 
 # ============================================================
 # ROUTES — WEB UI
@@ -348,6 +433,10 @@ ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "changeme123")
 @app.route("/")
 def index():
     return render_template_string(INDEX_HTML)
+
+@app.route("/step2")
+def step2():
+    return render_template_string(STEP2_HTML)
 
 @app.route("/admin")
 def admin():
@@ -363,13 +452,9 @@ def health():
 @app.route("/api/generate", methods=["POST"])
 def api_generate():
     data = request.json or {}
-    plan = data.get("plan", "standard")
     hwid = data.get("hwid", "")
 
-    if plan not in PLAN_CONFIG:
-        return jsonify({"error": "invalid_plan"}), 400
-
-    cfg = PLAN_CONFIG[plan]
+    cfg = PLAN_CONFIG["free"]
     suffix = secrets.token_hex(3).upper()
     key = f"BAZA_BCL_{suffix}"
     expires = int(time.time()) + cfg["hours"] * 3600
@@ -380,14 +465,14 @@ def api_generate():
 
     con = sqlite3.connect(DB)
     con.execute("INSERT INTO keys VALUES (?,?,?,?,?,?,?,?)",
-                (key, plan, expires, json.dumps(slots),
+                (key, "free", expires, json.dumps(slots),
                  cfg["tokens"], cfg["tokens"], 0, int(time.time())))
     con.commit()
     con.close()
 
     return jsonify({
         "key": key,
-        "plan": plan,
+        "plan": "free",
         "tokens": cfg["tokens"],
         "expires": expires
     })
@@ -460,7 +545,7 @@ def consume():
 def admin_generate():
     data = request.json or {}
     token = data.get("token")
-    plan = data.get("plan", "standard")
+    plan = data.get("plan", "free")
     amount = int(data.get("amount", 1))
 
     if token != ADMIN_TOKEN:
@@ -482,22 +567,8 @@ def admin_generate():
     con.close()
     return jsonify({"keys": keys, "plan": plan, "tokens": cfg["tokens"]})
 
-@app.route("/api/admin/keys")
-def admin_keys():
-    token = request.args.get("token")
-    if token != ADMIN_TOKEN:
-        return jsonify({"error": "unauthorized"}), 401
-
-    con = sqlite3.connect(DB)
-    rows = con.execute("SELECT key, plan, expires, tokens_left FROM keys ORDER BY created DESC LIMIT 100").fetchall()
-    con.close()
-
-    return jsonify({"keys": [
-        {"key": r[0], "plan": r[1], "expires": r[2], "tokens_left": r[3]} for r in rows
-    ]})
-
 # ============================================================
-# ROUTES — LOOTLABS POSTBACK
+# ROUTES — LOOTLABS POSTBACK (2 completions required)
 # ============================================================
 @app.route("/api/lootlabs/postback", methods=["GET"])
 def lootlabs_postback():
@@ -505,30 +576,65 @@ def lootlabs_postback():
     ip = request.args.get("ip")
     unique_id = request.args.get("unique_id")
 
-    if not unique_id:
-        unique_id = secrets.token_hex(8)
+    if not click_id:
+        return "missing click_id", 400
 
     con = sqlite3.connect(DB)
-    existing = con.execute("SELECT 1 FROM postbacks WHERE unique_id=?", (unique_id,)).fetchone()
-    if existing:
+    row = con.execute("SELECT completions, keys_issued FROM postbacks WHERE click_id=?",
+                      (click_id,)).fetchone()
+
+    if row:
+        completions, keys_issued = row
+    else:
+        completions, keys_issued = 0, 0
+
+    completions += 1
+
+    # Already issued after 2 completions — don't issue again
+    if completions >= REQUIRED_COMPLETIONS and keys_issued >= 1:
+        con.execute("UPDATE postbacks SET last_ip=?, last_ts=? WHERE click_id=?",
+                    (ip, int(time.time()), click_id))
+        con.commit()
         con.close()
-        return "duplicate", 200
+        return "already_issued", 200
 
-    con.execute("INSERT INTO postbacks VALUES (?,?,?,?)",
-                (unique_id, click_id, ip, int(time.time())))
+    # 2 completions — issue key
+    if completions >= REQUIRED_COMPLETIONS:
+        suffix = secrets.token_hex(3).upper()
+        key = f"BAZA_BCL_{suffix}"
+        expires = int(time.time()) + 24 * 3600
+        cfg = PLAN_CONFIG["free"]
 
-    suffix = secrets.token_hex(3).upper()
-    key = f"BAZA_BCL_{suffix}"
-    expires = int(time.time()) + 24 * 3600
-    cfg = PLAN_CONFIG["standard"]
+        con.execute("INSERT INTO keys VALUES (?,?,?,?,?,?,?,?)",
+                    (key, "free", expires, "[]", cfg["tokens"], cfg["tokens"], 0, int(time.time())))
 
-    con.execute("INSERT OR IGNORE INTO keys VALUES (?,?,?,?,?,?,?,?)",
-                (key, "standard", expires, "[]", cfg["tokens"], cfg["tokens"], 0, int(time.time())))
+        con.execute("""INSERT INTO postbacks (click_id, completions, last_ip, last_ts, keys_issued)
+                       VALUES (?,?,?,?,?)
+                       ON CONFLICT(click_id) DO UPDATE SET
+                       completions=excluded.completions,
+                       last_ip=excluded.last_ip,
+                       last_ts=excluded.last_ts,
+                       keys_issued=excluded.keys_issued""",
+                    (click_id, completions, ip, int(time.time()), 1))
+        con.commit()
+        con.close()
+
+        print(f"[Postback] click_id={click_id} → {completions}/{REQUIRED_COMPLETIONS} → KEY={key}")
+        return key, 200
+
+    # First completion — record, do NOT issue
+    con.execute("""INSERT INTO postbacks (click_id, completions, last_ip, last_ts, keys_issued)
+                   VALUES (?,?,?,?,0)
+                   ON CONFLICT(click_id) DO UPDATE SET
+                   completions=excluded.completions,
+                   last_ip=excluded.last_ip,
+                   last_ts=excluded.last_ts""",
+                (click_id, completions, ip, int(time.time())))
     con.commit()
     con.close()
 
-    print(f"[Postback] click_id={click_id} ip={ip} → key={key}")
-    return key, 200
+    print(f"[Postback] click_id={click_id} → {completions}/{REQUIRED_COMPLETIONS} (waiting)")
+    return f"registered {completions}/{REQUIRED_COMPLETIONS}", 200
 
 # ============================================================
 # STARTUP
