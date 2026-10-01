@@ -1,4 +1,4 @@
-# app.py — Baza.Key Backend v1.2.0
+# app.py — Baza.Key Backend v1.2.1
 import os
 import json
 import time
@@ -283,12 +283,12 @@ def api_getlink():
             timeout=8
         )
         data = r.json()
-if data.get("type") in ("created", "fetched"):
-    encrypted = data["message"]
-    puid = request.args.get("puid") or secrets.token_hex(8)
-    final_link = f"{LOOTLABS_BASE_LINK}&puid={puid}&data={encrypted}"
-    return jsonify({"link": final_link})
-return jsonify({"error": data.get("message", "encrypt failed")}), 500
+        if data.get("type") in ("created", "fetched"):
+            encrypted = data["message"]
+            puid = request.args.get("puid") or secrets.token_hex(8)
+            final_link = f"{LOOTLABS_BASE_LINK}&puid={puid}&data={encrypted}"
+            return jsonify({"link": final_link})
+        return jsonify({"error": data.get("message", "encrypt failed")}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
