@@ -1,4 +1,4 @@
-# app.py — Baza.Key Backend v1.2.1
+# app.py — Baza.Key Backend v1.2.2
 import os
 import json
 import time
@@ -274,9 +274,9 @@ def api_getlink():
         return jsonify({"error": "LootLabs not configured"}), 500
 
     try:
-        r = requests.post(
+        r = requests.get(
             "https://creators.lootlabs.gg/api/public/url_encryptor",
-            json={
+            params={
                 "destination_url": "https://baza-key.onrender.com",
                 "api_token": LOOTLABS_API_KEY
             },
