@@ -1,4 +1,5 @@
-# app.py — Baza.Key Backend v1.2.2
+# app.py — Baza.Key Backend v1.2.4
+# Keys: BAZA_BCL_ + 16 random alphanumeric (mixed case)
 import os
 import json
 import time
@@ -24,6 +25,15 @@ REQUIRED_COMPLETIONS = 2
 FREE_TOKENS = 1000
 FREE_HOURS = 24
 
+ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+KEY_SUFFIX_LEN = 16
+
+
+def gen_key():
+    suffix = "".join(secrets.choice(ALPHABET) for _ in range(KEY_SUFFIX_LEN))
+    return f"BAZA_BCL_{suffix}"
+
+
 def init_db():
     con = sqlite3.connect(DB)
     con.execute("""CREATE TABLE IF NOT EXISTS keys (
@@ -46,6 +56,7 @@ def init_db():
     )""")
     con.commit()
     con.close()
+
 
 BASE_CSS = """
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -136,6 +147,14 @@ button:active { transform: translateY(0); }
     color: #40dc64; font-weight: 700; font-size: 15px;
     display: block; margin-bottom: 8px;
 }
+.bigkey {
+    font-family: 'Courier New', monospace;
+    font-size: 17px; font-weight: 700; color: #40dc64;
+    text-align: center; padding: 18px;
+    background: #001a00; border: 1.5px solid #40dc64;
+    border-radius: 8px; margin: 16px 0;
+    word-break: break-all; letter-spacing: 0.5px;
+}
 """
 
 INDEX_HTML = """<!DOCTYPE html>
@@ -175,13 +194,10 @@ INDEX_HTML = """<!DOCTYPE html>
 
                 if (data.link) {
                     status.textContent = 'Redirecting to LootLabs...';
+                    if (data.puid) {
+                        try { localStorage.setItem('baza_puid', data.puid); } catch(e) {}
+                    }
                     window.location.href = data.link;
-                } else if (data.key) {
-                    result.innerHTML =
-                        '<span class="key">' + data.key + '</span>' +
-                        'Save this key. Expires in 24h.';
-                    result.classList.add('show');
-                    status.textContent = '';
                 } else {
                     status.textContent = 'Error: ' + (data.error || 'try again');
                 }
@@ -189,6 +205,87 @@ INDEX_HTML = """<!DOCTYPE html>
                 status.textContent = 'Network error. Refresh and retry.';
             }
         }
+    </script>
+</body>
+</html>
+"""
+
+MYKEY_HTML = """<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Baza.Key — Your Key</title>
+    <style>""" + BASE_CSS + """</style>
+</head>
+<body>
+    <div class="card">
+        <div class="badge">YOUR KEY</div>
+        <div class="logo">Baza.Key</div>
+        <div class="subtitle" id="subtitle">Loading...</div>
+
+        <div id="content"></div>
+
+        <a class="discord" href="https://discord.gg/vVFeyntpa" target="_blank">
+            Join to Discord Community
+        </a>
+    </div>
+
+    <script>
+        function getPuid() {
+            const params = new URLSearchParams(window.location.search);
+            let puid = params.get('puid') || params.get('click_id');
+            if (!puid) {
+                try { puid = localStorage.getItem('baza_puid'); } catch(e) {}
+            }
+            return puid || '';
+        }
+
+        async function load() {
+            const subtitle = document.getElementById('subtitle');
+            const content = document.getElementById('content');
+            const puid = getPuid();
+
+            if (!puid) {
+                subtitle.textContent = 'No user ID';
+                content.innerHTML = '<div class="info">Start on the main page — click <b>Get Key via LootLabs</b>.</div>';
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/mykey?puid=' + encodeURIComponent(puid));
+                const data = await res.json();
+
+                if (data.key) {
+                    subtitle.textContent = 'Your key is ready!';
+                    const exp = new Date(data.expires * 1000);
+                    content.innerHTML =
+                        '<div class="bigkey">' + data.key + '</div>' +
+                        '<div class="info">' +
+                        'Plan: <b>FREE</b><br>' +
+                        'Tokens: <b>' + data.tokens + '</b><br>' +
+                        'Expires: <b>' + exp.toLocaleString() + '</b>' +
+                        '</div>';
+                } else if (data.progress) {
+                    subtitle.textContent = 'In progress...';
+                    content.innerHTML =
+                        '<div class="info">' +
+                        'Progress: <b>' + data.progress + '</b><br><br>' +
+                        'Complete tasks <b>2 times</b> to unlock your key.<br>' +
+                        'Click the link in Discord again.' +
+                        '</div>';
+                } else {
+                    subtitle.textContent = 'Not found';
+                    content.innerHTML =
+                        '<div class="info">No data for this user ID.<br>' +
+                        'Start on the main page — click <b>Get Key via LootLabs</b>.</div>';
+                }
+            } catch (e) {
+                subtitle.textContent = 'Error';
+                content.innerHTML = '<div class="info">Network error. Refresh and retry.</div>';
+            }
+        }
+        load();
     </script>
 </body>
 </html>
@@ -256,17 +353,60 @@ ADMIN_HTML = """<!DOCTYPE html>
 </html>
 """
 
+
 @app.route("/")
 def index():
     return render_template_string(INDEX_HTML)
+
+
+@app.route("/mykey")
+def mykey():
+    return render_template_string(MYKEY_HTML)
+
 
 @app.route("/admin")
 def admin():
     return render_template_string(ADMIN_HTML)
 
+
 @app.route("/health")
 def health():
     return "OK"
+
+
+@app.route("/api/mykey")
+def api_mykey():
+    puid = request.args.get("puid")
+    if not puid:
+        return jsonify({"error": "missing puid"}), 400
+
+    con = sqlite3.connect(DB)
+    row = con.execute("SELECT completions, issued_key FROM postbacks WHERE click_id=?",
+                      (puid,)).fetchone()
+
+    if not row:
+        con.close()
+        return jsonify({"error": "not_found"})
+
+    completions, issued_key = row
+    con.close()
+
+    if issued_key:
+        con = sqlite3.connect(DB)
+        krow = con.execute("SELECT plan, expires, tokens_total FROM keys WHERE key=?",
+                           (issued_key,)).fetchone()
+        con.close()
+        if krow:
+            plan, expires, tokens_total = krow
+            return jsonify({
+                "key": issued_key,
+                "plan": plan,
+                "expires": expires,
+                "tokens": tokens_total
+            })
+
+    return jsonify({"progress": f"{completions}/{REQUIRED_COMPLETIONS}"})
+
 
 @app.route("/api/getlink")
 def api_getlink():
@@ -287,10 +427,11 @@ def api_getlink():
             encrypted = data["message"]
             puid = request.args.get("puid") or secrets.token_hex(8)
             final_link = f"{LOOTLABS_BASE_LINK}&puid={puid}&data={encrypted}"
-            return jsonify({"link": final_link})
+            return jsonify({"link": final_link, "puid": puid})
         return jsonify({"error": data.get("message", "encrypt failed")}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/getscript", methods=["POST"])
 def api_getscript():
@@ -334,6 +475,7 @@ def api_getscript():
     except Exception as e:
         return jsonify({"error": "script_read_failed", "detail": str(e)}), 500
 
+
 @app.route("/validate", methods=["POST"])
 def validate():
     data = request.json or {}
@@ -371,6 +513,7 @@ def validate():
         "expires": expires
     })
 
+
 @app.route("/consume", methods=["POST"])
 def consume():
     data = request.json or {}
@@ -387,6 +530,7 @@ def consume():
     con.commit()
     con.close()
     return jsonify({"ok": True, "tokens_left": new_left})
+
 
 @app.route("/api/lootlabs/postback", methods=["GET"])
 def lootlabs_postback():
@@ -424,8 +568,7 @@ def lootlabs_postback():
         print(f"[Postback] {click_id} → {completions}/{REQUIRED_COMPLETIONS}")
         return f"registered {completions}/{REQUIRED_COMPLETIONS}", 200
 
-    suffix = secrets.token_hex(3).upper()
-    key = f"BAZA_BCL_{suffix}"
+    key = gen_key()
     expires = int(time.time()) + FREE_HOURS * 3600
 
     con.execute("INSERT INTO keys VALUES (?,?,?,?,?,?,?,?)",
@@ -445,6 +588,7 @@ def lootlabs_postback():
     print(f"[Postback] {click_id} → {completions}/{REQUIRED_COMPLETIONS} → KEY={key}")
     return key, 200
 
+
 @app.route("/api/admin/generate", methods=["POST"])
 def admin_generate():
     data = request.json or {}
@@ -455,8 +599,7 @@ def admin_generate():
     keys = []
     con = sqlite3.connect(DB)
     for _ in range(amount):
-        suffix = secrets.token_hex(3).upper()
-        key = f"BAZA_BCL_{suffix}"
+        key = gen_key()
         expires = int(time.time()) + FREE_HOURS * 3600
         con.execute("INSERT OR IGNORE INTO keys VALUES (?,?,?,?,?,?,?,?)",
                     (key, "free", expires, "[]", FREE_TOKENS, FREE_TOKENS, 0, int(time.time())))
@@ -464,6 +607,7 @@ def admin_generate():
     con.commit()
     con.close()
     return jsonify({"keys": keys})
+
 
 init_db()
 
